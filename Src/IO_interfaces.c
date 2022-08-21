@@ -43,7 +43,8 @@ void usb_send_buffer(uint8_t *msg, uint32_t size) {
 extern UART_HandleTypeDef huart1;
 
 #define RDM6300_BAUDRATE				(9600)
-#define RDM6300_PACKET_SIZE				(14)
+#define RDM6300_PACKET_DATA_SIZE		(12)
+#define RDM6300_PACKET_CHECKSUM_SIZE	(2)
 #define RDM6300_PACKET_BEGIN			(0x02)
 #define RDM6300_PACKET_END				(0x03)
 #define RDM6300_DEFAULT_TAG_TIMEOUT_MS	(300)
@@ -51,13 +52,56 @@ extern UART_HandleTypeDef huart1;
 
 #define PACKET_RESET_POS ((uint32_t)-1)
 
-//uint8_t packet[RDM6300_PACKET_SIZE];
+uint8_t packet[RDM6300_PACKET_DATA_SIZE];
 uint32_t packet_pos = -1;
 uint32_t packet_rx_start_time = -1;
 uint32_t char_rx_time = -1;
 
+uint8_t _hex(uint8_t c) {
+	return "0123456789ABCDEF"[c];
+}
+
+uint32_t hex(uint8_t c) {
+	return ((uint32_t)_hex(c & 15) << 8) + (uint32_t)_hex(c >> 4);
+}
+
+uint32_t hexRepr(uint8_t c) {
+	return (hex(c) << 8) + 'x';
+}
+
+uint8_t read_hex(uint8_t c) {
+	if ('0' <= c && c <= '9')
+		return c - '0';
+	if ('A' <= c && c <= 'Z')
+		return c + 10 - 'A';
+	USB_D("error non hex char: ");
+	usb_msg(&c, 1);
+	USB_D("\r\n");
+	return 0;
+}
+
+uint32_t packet_checksum_ok() {
+	uint32_t s = RDM6300_PACKET_CHECKSUM_SIZE;
+	uint8_t sum[s];
+	memset(sum, 0, s);
+	for (uint32_t i=0; i<RDM6300_PACKET_DATA_SIZE-s; i+=s)
+		for (uint32_t j=0; j < s; j++)
+			sum[j] ^= read_hex(packet[i+j]);
+
+	for (uint32_t j=0; j < s; j++)
+		sum[j] = _hex(sum[j]);
+
+	uint32_t ok = !memcmp(sum, packet + RDM6300_PACKET_DATA_SIZE - s, s);
+	USB_D("\r\nChecksum ");
+	if (ok) USB_D("OK: "); else USB_D("ERROR: ");
+	usb_msg(sum, s);
+	USB_D("\r\n");
+	return ok;
+}
+
 void RDM6300_RX_packet_complet() {
-	USB_D("\r\nPacket received successfully\r\n");
+	if (packet_checksum_ok())
+		USB_D("Packet received successfully\r\n");
 	//usb_msg(packet, RDM6300_PACKET_SIZE);
 	//USB_D("\r\n");
 }
@@ -97,7 +141,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	  }
 	  return;
 	}
-	if (packet_pos >= RDM6300_PACKET_SIZE) {
+	if (packet_pos >= RDM6300_PACKET_DATA_SIZE) {
 	  if (c == RDM6300_PACKET_END) {
 		  RDM6300_RX_packet_complet();
 	  } else {
@@ -106,10 +150,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	  packet_pos = PACKET_RESET_POS;
 	  return;
 	}
-	//packet[packet_pos] = c;
+	packet[packet_pos] = c;
 	packet_pos++;
-	usb_msg(&c, 1);
+	if (0x20 <= c && c < 0x7f)
+		usb_msg(&c, 1);
+	else {
+		uint32_t h = hexRepr(c);
+		usb_msg((uint8_t*)&h, 3);
+	}
 }
+
 
 
 void uart_test_transmission() {
